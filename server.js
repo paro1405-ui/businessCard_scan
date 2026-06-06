@@ -10,7 +10,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const sharp = require('sharp');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: 'uploads/', limits: { fileSize: 20 * 1024 * 1024 } });
 
 app.use(cors());
 app.use(express.json());
@@ -70,12 +70,12 @@ app.post('/scan-card', upload.single('image'), async (req, res) => {
       sizeKB: (imageBuffer.length / 1024).toFixed(2)
     });
     
-    // Check file size (limit to 5MB)
-    if (imageBuffer.length > 5 * 1024 * 1024) {
+    // Check file size (limit to 20MB)
+    if (imageBuffer.length > 20 * 1024 * 1024) {
       fs.unlinkSync(imagePath);
       console.log('[SCAN] Rejected upload: file too large');
       return res.status(400).json({
-        error: 'Image file too large. Maximum size: 5MB'
+        error: 'Image file too large. Maximum size: 20MB'
       });
     }
 
