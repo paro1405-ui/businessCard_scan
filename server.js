@@ -1,11 +1,11 @@
 
-require('dotenv').config();
+require('dotenv').config({ override: true });
 
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const sharp = require('sharp');
 
@@ -17,16 +17,17 @@ app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Initialize SQLite Database
-const db = new sqlite3.Database('./business_cards.db', (err) => {
-  if (err) {
-    console.error('Error opening database:', err);
-  } else {
-    console.log('Connected to SQLite database');
-    // Create table if not exists
-    db.run(`
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : false
+});
+
+const initDb = async () => {
+  try {
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS business_cards (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
+        event_name TEXT,
         name TEXT,
         designation TEXT,
         company TEXT,
@@ -35,124 +36,155 @@ const db = new sqlite3.Database('./business_cards.db', (err) => {
         website TEXT,
         address TEXT,
         remarks TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        file_path TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
       )
-    `, (err) => {
-      if (err) {
-        console.error('Error creating table:', err);
-      } else {
-        console.log('Business cards table ready');
-      }
-    });
+    `);
+    console.log('Connected to PostgreSQL database and ensured business_cards table exists');
+  } catch (err) {
+    console.error('Error initializing PostgreSQL database:', err);
+    process.exit(1);
   }
-});
+};
+
+// Helper function to ensure event folder exists
+const ensureEventFolder = (eventName) => {
+  const eventFolder = `uploads/${eventName}`;
+  if (!fs.existsSync(eventFolder)) {
+    fs.mkdirSync(eventFolder, { recursive: true });
+  }
+  return eventFolder;
+};
+
+initDb();
 
 app.get('/', (req, res) => {
   res.send('Business Card AI Scanner Backend Running');
 });
 
-app.post('/scan-card', upload.single('image'), async (req, res) => {
+app.post('/api/scan-card', async (req, res) => {
   const startTime = Date.now();
   const DEBUG = process.env.DEBUG === 'true';
+  const eventName = req.query.event || 'default';
   
-  try {
-    const model = genAI.getGenerativeModel(
-      { model: process.env.GEMINI_MODEL || 'gemini-2.5-flash' },
-      { apiVersion: 'v1' }
-    );
+  // Create custom multer for this event
+  const eventFolder = ensureEventFolder(eventName);
+  const uploadEvent = multer({ dest: eventFolder, limits: { fileSize: 20 * 1024 * 1024 } });
+  
+  uploadEvent.single('image')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ error: 'Upload failed', details: err.message });
+    }
 
-    const imagePath = req.file.path;
-    let imageBuffer = fs.readFileSync(imagePath);
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+  
+    try {
+      const model = genAI.getGenerativeModel(
+        { model: process.env.GEMINI_MODEL || 'gemini-2.5-flash' },
+        { apiVersion: 'v1' }
+      );
 
-    console.log('[SCAN] /scan-card request received:', {
-      file: req.file.originalname,
-      mimeType: req.file.mimetype,
-      sizeKB: (imageBuffer.length / 1024).toFixed(2)
-    });
-    
-    // Check file size (limit to 20MB)
-    if (imageBuffer.length > 20 * 1024 * 1024) {
+      const imagePath = req.file.path;
+      let imageBuffer = fs.readFileSync(imagePath);
+
+      console.log('[SCAN] /scan-card request received:', {
+        event: eventName,
+        file: req.file.originalname,
+        mimeType: req.file.mimetype,
+        sizeKB: (imageBuffer.length / 1024).toFixed(2)
+      });
+      
+      // Check file size (limit to 20MB)
+      if (imageBuffer.length > 20 * 1024 * 1024) {
+        fs.unlinkSync(imagePath);
+        console.log('[SCAN] Rejected upload: file too large');
+        return res.status(400).json({
+          error: 'Image file too large. Maximum size: 20MB'
+        });
+      }
+
+      console.log(`[SCAN] Original size: ${(imageBuffer.length / 1024).toFixed(2)}KB`);
+
+      // Compress image with sharp
+      imageBuffer = await sharp(imagePath)
+        .resize(1200, 1200, {
+          fit: 'inside',
+          withoutEnlargement: true
+        })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+
+      if (DEBUG) {
+        console.log(`[SCAN] Compressed size: ${(imageBuffer.length / 1024).toFixed(2)}KB`);
+      }
+
+      const prompt = `Extract business card info as JSON only. Fields: name, designation, company, phone, email, website, address. Use empty string for missing fields.`;
+      console.log('[SCAN] Sending image to Gemini API with prompt length', prompt.length);
+
+      // Set timeout for API call (30 seconds)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const result = await model.generateContent([
+        prompt,
+        {
+          inlineData: {
+            data: imageBuffer.toString('base64'),
+            mimeType: 'image/jpeg'
+          }
+        }
+      ]);
+
+      clearTimeout(timeoutId);
+
+      const responseText = result.response.text();
+      
+      let cleaned = responseText
+        .replace(/```json/g, '')
+        .replace(/```/g, '')
+        .trim();
+
+      const parsed = JSON.parse(cleaned);
+
       fs.unlinkSync(imagePath);
-      console.log('[SCAN] Rejected upload: file too large');
-      return res.status(400).json({
-        error: 'Image file too large. Maximum size: 20MB'
+      console.log('[SCAN] Parsed response:', parsed);
+
+      if (DEBUG) {
+        console.log(`[SCAN] Completed in ${Date.now() - startTime}ms`);
+      }
+
+      // Return parsed data with event name and file path
+      res.json({
+        ...parsed,
+        event_name: eventName,
+        file_path: imagePath
+      });
+
+    } catch (error) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (e) {}
+      
+      console.error('[SCAN] Scan error:', {
+        message: error.message,
+        stack: error.stack
+      });
+      
+      const statusCode = error.message?.includes('abort') ? 504 : 500;
+      res.status(statusCode).json({
+        error: 'Failed to scan business card',
+        details: error.message
       });
     }
-
-    console.log(`[SCAN] Original size: ${(imageBuffer.length / 1024).toFixed(2)}KB`);
-
-    // Compress image with sharp
-    imageBuffer = await sharp(imagePath)
-      .resize(1200, 1200, {
-        fit: 'inside',
-        withoutEnlargement: true
-      })
-      .jpeg({ quality: 80 })
-      .toBuffer();
-
-    if (DEBUG) {
-      console.log(`[SCAN] Compressed size: ${(imageBuffer.length / 1024).toFixed(2)}KB`);
-    }
-
-    const prompt = `Extract business card info as JSON only. Fields: name, designation, company, phone, email, website, address. Use empty string for missing fields.`;
-    console.log('[SCAN] Sending image to Gemini API with prompt length', prompt.length);
-
-    // Set timeout for API call (30 seconds)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: imageBuffer.toString('base64'),
-          mimeType: 'image/jpeg'
-        }
-      }
-    ]);
-
-    clearTimeout(timeoutId);
-
-    const responseText = result.response.text();
-    
-    let cleaned = responseText
-      .replace(/```json/g, '')
-      .replace(/```/g, '')
-      .trim();
-
-    const parsed = JSON.parse(cleaned);
-
-    fs.unlinkSync(imagePath);
-    console.log('[SCAN] Parsed response:', parsed);
-
-    if (DEBUG) {
-      console.log(`[SCAN] Completed in ${Date.now() - startTime}ms`);
-    }
-
-    res.json(parsed);
-
-  } catch (error) {
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (e) {}
-    
-    console.error('[SCAN] Scan error:', {
-      message: error.message,
-      stack: error.stack
-    });
-    
-    const statusCode = error.message?.includes('abort') ? 504 : 500;
-    res.status(statusCode).json({
-      error: 'Failed to scan business card',
-      details: error.message
-    });
-  }
+  });
 });
 
 // Save Business Card Data to Database
-app.post('/save-data', (req, res) => {
+app.post('/api/save-data', async (req, res) => {
   try {
-    const { name, designation, company, phone, email, website, address, remarks } = req.body;
+    const { name, designation, company, phone, email, website, address, remarks, event_name, file_path } = req.body;
 
     // Validate required fields
     if (!name) {
@@ -162,59 +194,66 @@ app.post('/save-data', (req, res) => {
     }
 
     const query = `
-      INSERT INTO business_cards (name, designation, company, phone, email, website, address, remarks)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO business_cards (event_name, name, designation, company, phone, email, website, address, remarks, file_path)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id
     `;
 
-    db.run(query, [name, designation, company, phone, email, website, address, remarks], function(err) {
-      if (err) {
-        console.error('Error saving data:', err);
-        return res.status(500).json({
-          error: 'Failed to save data',
-          details: err.message
-        });
-      }
+    const result = await pool.query(query, [event_name || 'default', name, designation, company, phone, email, website, address, remarks, file_path]);
 
-      res.json({
-        success: true,
-        message: 'Data saved successfully',
-        id: this.lastID
-      });
+    res.json({
+      success: true,
+      message: 'Data saved successfully',
+      id: result.rows[0].id
     });
-
   } catch (error) {
     console.error('Error in save-data route:', error);
     res.status(500).json({
-      error: 'Server error',
+      error: 'Failed to save data',
       details: error.message
     });
   }
 });
 
-// Get all saved business cards (optional - for viewing stored data)
-app.get('/get-data', (req, res) => {
-  db.all('SELECT * FROM business_cards ORDER BY created_at DESC', (err, rows) => {
-    if (err) {
-      console.error('Error fetching data:', err);
-      return res.status(500).json({
-        error: 'Failed to fetch data',
-        details: err.message
-      });
+// Get all saved business cards (with optional event filter)
+app.get('/api/get-data', async (req, res) => {
+  try {
+    const eventName = req.query.event;
+    let query = 'SELECT * FROM business_cards';
+    let params = [];
+
+    if (eventName) {
+      query += ' WHERE event_name = $1';
+      params.push(eventName);
     }
-    res.json(rows);
-  });
+
+    query += ' ORDER BY created_at DESC';
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching data:', err);
+    res.status(500).json({
+      error: 'Failed to fetch data',
+      details: err.message
+    });
+  }
 });
 
-// Export saved data as CSV for Excel
-app.get('/export-data', (req, res) => {
-  db.all('SELECT * FROM business_cards ORDER BY created_at DESC', (err, rows) => {
-    if (err) {
-      console.error('Error exporting data:', err);
-      return res.status(500).json({
-        error: 'Failed to export data',
-        details: err.message
-      });
+// Export saved data as CSV for Excel (with optional event filter)
+app.get('/api/export-data', async (req, res) => {
+  try {
+    const eventName = req.query.event;
+    let query = 'SELECT * FROM business_cards';
+    let params = [];
+
+    if (eventName) {
+      query += ' WHERE event_name = $1';
+      params.push(eventName);
     }
+
+    query += ' ORDER BY created_at DESC';
+    const result = await pool.query(query, params);
+    const rows = result.rows;
 
     const escapeCsv = (value) => {
       if (value === null || value === undefined) {
@@ -227,7 +266,7 @@ app.get('/export-data', (req, res) => {
       return text;
     };
 
-    const headers = ['id', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
+    const headers = ['id', 'event_name', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
     const csvRows = [headers.join(',')];
 
     rows.forEach(row => {
@@ -239,10 +278,16 @@ app.get('/export-data', (req, res) => {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="business_cards.csv"');
     res.send(csv);
-  });
+  } catch (err) {
+    console.error('Error exporting data:', err);
+    res.status(500).json({
+      error: 'Failed to export data',
+      details: err.message
+    });
+  }
 });
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
