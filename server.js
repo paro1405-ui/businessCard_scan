@@ -17,10 +17,33 @@ app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : false
-});
+const makeDbConfig = () => {
+  const connectionString = process.env.DATABASE_URL;
+  const password = process.env.PGPASSWORD;
+
+  if (connectionString !== undefined && typeof connectionString !== 'string') {
+    throw new Error('DATABASE_URL must be a string');
+  }
+
+  if (password !== undefined && typeof password !== 'string') {
+    throw new Error('PGPASSWORD must be a string');
+  }
+
+  if (!connectionString && !process.env.PGHOST) {
+    throw new Error('Database configuration is missing. Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE.');
+  }
+
+  return {
+    connectionString: connectionString ? String(connectionString) : undefined,
+    host: process.env.PGHOST,
+    user: process.env.PGUSER,
+    password: password ? String(password) : undefined,
+    database: process.env.PGDATABASE,
+    ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : false
+  };
+};
+
+const pool = new Pool(makeDbConfig());
 
 const initDb = async () => {
   try {
