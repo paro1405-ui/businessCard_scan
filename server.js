@@ -70,9 +70,18 @@ const initDb = async () => {
   }
 };
 
+// Normalize event name by removing spaces
+const normalizeEventName = (eventName) => {
+  if (!eventName || typeof eventName !== 'string') {
+    return 'default';
+  }
+  return eventName.replace(/\s+/g, '');
+};
+
 // Helper function to ensure event folder exists
 const ensureEventFolder = (eventName) => {
-  const eventFolder = `uploads/${eventName}`;
+  const normalizedEventName = normalizeEventName(eventName);
+  const eventFolder = `uploads/${normalizedEventName}`;
   if (!fs.existsSync(eventFolder)) {
     fs.mkdirSync(eventFolder, { recursive: true });
   }
@@ -88,7 +97,7 @@ app.get('/', (req, res) => {
 app.post('/api/scan-card', async (req, res) => {
   const startTime = Date.now();
   const DEBUG = process.env.DEBUG === 'true';
-  const eventName = req.query.event || 'default';
+  const eventName = normalizeEventName(req.query.event || 'default');
   
   // Create custom multer for this event
   const eventFolder = ensureEventFolder(eventName);
@@ -207,7 +216,8 @@ app.post('/api/scan-card', async (req, res) => {
 // Save Business Card Data to Database
 app.post('/api/save-data', async (req, res) => {
   try {
-    const { name, designation, company, phone, email, website, address, remarks, event_name, file_path } = req.body;
+    let { name, designation, company, phone, email, website, address, remarks, event_name, file_path } = req.body;
+    event_name = normalizeEventName(event_name || 'default');
 
     // Validate required fields
     if (!name) {
@@ -222,7 +232,7 @@ app.post('/api/save-data', async (req, res) => {
       RETURNING id
     `;
 
-    const result = await pool.query(query, [event_name || 'default', name, designation, company, phone, email, website, address, remarks, file_path]);
+    const result = await pool.query(query, [event_name, name, designation, company, phone, email, website, address, remarks, file_path]);
 
     res.json({
       success: true,
@@ -241,7 +251,7 @@ app.post('/api/save-data', async (req, res) => {
 // Get all saved business cards (with optional event filter)
 app.get('/api/get-data', async (req, res) => {
   try {
-    const eventName = req.query.event;
+    const eventName = req.query.event ? normalizeEventName(req.query.event) : undefined;
     let query = 'SELECT * FROM business_cards';
     let params = [];
 
@@ -265,7 +275,7 @@ app.get('/api/get-data', async (req, res) => {
 // Export saved data as CSV for Excel (with optional event filter)
 app.get('/api/export-data', async (req, res) => {
   try {
-    const eventName = req.query.event;
+    const eventName = req.query.event ? normalizeEventName(req.query.event) : undefined;
     let query = 'SELECT * FROM business_cards';
     let params = [];
 
