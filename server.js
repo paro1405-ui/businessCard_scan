@@ -63,7 +63,17 @@ const initDb = async () => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    console.log('Connected to PostgreSQL database and ensured business_cards table exists');
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS event_list (
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    console.log('Connected to PostgreSQL database and ensured required tables exist');
   } catch (err) {
     console.error('Error initializing PostgreSQL database:', err);
     process.exit(1);
@@ -75,7 +85,7 @@ const normalizeEventName = (eventName) => {
   if (!eventName || typeof eventName !== 'string') {
     return 'default';
   }
-  return eventName.replace(/\s+/g, '');
+  return eventName.trim().replace(/\s+/g, '');
 };
 
 // Helper function to ensure event folder exists
@@ -92,6 +102,24 @@ initDb();
 
 app.get('/', (req, res) => {
   res.send('Business Card AI Scanner Backend Running');
+});
+
+app.get('/api/events', async (req, res) => {
+  try {
+    const activeOnly = req.query.active === 'true';
+    let query = 'SELECT id, event_name, isactive FROM eventlist';
+    const params = [];
+    if (activeOnly) {
+      query += ' WHERE isactive = true';
+    }
+    query += ' ORDER BY event_name ASC';
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching event list:', error);
+    res.status(500).json({ error: 'Failed to fetch event list', details: error.message });
+  }
 });
 
 app.post('/api/scan-card', async (req, res) => {
@@ -216,8 +244,8 @@ app.post('/api/scan-card', async (req, res) => {
 // Save Business Card Data to Database
 app.post('/api/save-data', async (req, res) => {
   try {
-    let { name, designation, company, phone, email, website, address, remarks, event_name, file_path } = req.body;
-    event_name = normalizeEventName(event_name || 'default');
+    let { name, designation, company, phone, email, website, address, remarks, event_name, event, file_path } = req.body;
+    event_name = normalizeEventName(event_name || event || 'default');
 
     // Validate required fields
     if (!name) {
@@ -251,7 +279,7 @@ app.post('/api/save-data', async (req, res) => {
 // Get all saved business cards (with optional event filter)
 app.get('/api/get-data', async (req, res) => {
   try {
-    const eventName = req.query.event ? normalizeEventName(req.query.event) : undefined;
+    const eventName = req.query.event_name ? normalizeEventName(req.query.event_name) : (req.query.event ? normalizeEventName(req.query.event) : undefined);
     let query = 'SELECT * FROM business_cards';
     let params = [];
 
@@ -275,7 +303,7 @@ app.get('/api/get-data', async (req, res) => {
 // Export saved data as CSV for Excel (with optional event filter)
 app.get('/api/export-data', async (req, res) => {
   try {
-    const eventName = req.query.event ? normalizeEventName(req.query.event) : undefined;
+    const eventName = req.query.event_name ? normalizeEventName(req.query.event_name) : (req.query.event ? normalizeEventName(req.query.event) : undefined);
     let query = 'SELECT * FROM business_cards';
     let params = [];
 
@@ -287,6 +315,7 @@ app.get('/api/export-data', async (req, res) => {
     query += ' ORDER BY created_at DESC';
     const result = await pool.query(query, params);
     const rows = result.rows;
+    console.log('[EXPORT] CSV export count:', rows.length, 'eventName:', eventName || 'all');
 
     const escapeCsv = (value) => {
       if (value === null || value === undefined) {
