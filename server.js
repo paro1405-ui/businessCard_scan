@@ -51,6 +51,7 @@ const initDb = async () => {
       CREATE TABLE IF NOT EXISTS business_cards (
         id SERIAL PRIMARY KEY,
         event_name TEXT,
+        scan_by TEXT,
         name TEXT,
         designation TEXT,
         company TEXT,
@@ -72,6 +73,9 @@ const initDb = async () => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+
+    // Ensure newer columns exist for backwards compatibility
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS scan_by TEXT`);
 
     console.log('Connected to PostgreSQL database and ensured required tables exist');
   } catch (err) {
@@ -244,7 +248,7 @@ app.post('/api/scan-card', async (req, res) => {
 // Save Business Card Data to Database
 app.post('/api/save-data', async (req, res) => {
   try {
-    let { name, designation, company, phone, email, website, address, remarks, event_name, event, file_path } = req.body;
+    let { name, designation, company, phone, email, website, address, remarks, event_name, event, file_path, scan_by } = req.body;
     event_name = normalizeEventName(event_name || event || 'default');
 
     // Validate required fields
@@ -255,12 +259,12 @@ app.post('/api/save-data', async (req, res) => {
     }
 
     const query = `
-      INSERT INTO business_cards (event_name, name, designation, company, phone, email, website, address, remarks, file_path)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO business_cards (event_name, scan_by, name, designation, company, phone, email, website, address, remarks, file_path)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING id
     `;
 
-    const result = await pool.query(query, [event_name, name, designation, company, phone, email, website, address, remarks, file_path]);
+    const result = await pool.query(query, [event_name, scan_by, name, designation, company, phone, email, website, address, remarks, file_path]);
 
     res.json({
       success: true,
@@ -328,7 +332,7 @@ app.get('/api/export-data', async (req, res) => {
       return text;
     };
 
-    const headers = ['id', 'event_name', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
+    const headers = ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
     const csvRows = [headers.join(',')];
 
     rows.forEach(row => {
