@@ -15,6 +15,11 @@ const upload = multer({ dest: 'uploads/', limits: { fileSize: 20 * 1024 * 1024 }
 app.use(cors());
 app.use(express.json());
 
+const PQueue = require('p-queue').default;
+
+const scanQueue = new PQueue({
+  concurrency: 3
+});
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const makeDbConfig = () => {
@@ -191,16 +196,38 @@ app.post('/api/scan-card', async (req, res) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-      const result = await model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            data: imageBuffer.toString('base64'),
-            mimeType: 'image/jpeg'
-          }
-        }
-      ]);
+const result = await scanQueue.add(() =>
+  generateWithRetry(model, [
+    prompt,
+    {
+      inlineData: {
+        data: imageBuffer.toString('base64'),
+        mimeType: 'image/jpeg'
+      }
+    }
+  ])
+);
+async function generateWithRetry(model, content) {
+  let retries = 3;
 
+  while (retries > 0) {
+    try {
+      return await model.generateContent(content);
+    } catch (err) {
+      if (
+        err.message.includes('429') ||
+        err.message.includes('503')
+      ) {
+        retries--;
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  throw new Error('Gemini temporarily unavailable');
+}
       clearTimeout(timeoutId);
 
       const responseText = result.response.text();
