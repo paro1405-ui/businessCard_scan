@@ -64,6 +64,9 @@ const initDb = async () => {
         email TEXT,
         website TEXT,
         address TEXT,
+        city TEXT,
+        state TEXT,
+        rank TEXT,
         remarks TEXT,
         file_path TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW()
@@ -81,6 +84,9 @@ const initDb = async () => {
 
     // Ensure newer columns exist for backwards compatibility
     await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS scan_by TEXT`);
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS city TEXT`);
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS state TEXT`);
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS rank TEXT`);
 
     console.log('Connected to PostgreSQL database and ensured required tables exist');
   } catch (err) {
@@ -275,7 +281,7 @@ async function generateWithRetry(model, content) {
 // Save Business Card Data to Database
 app.post('/api/save-data', async (req, res) => {
   try {
-    let { name, designation, company, phone, email, website, address, remarks, event_name, event, file_path, scan_by } = req.body;
+    let { name, designation, company, phone, email, website, address, city, state, rank, remarks, event_name, event, file_path, scan_by } = req.body;
     event_name = normalizeEventName(event_name || event || 'default');
 
     // Validate required fields
@@ -286,12 +292,12 @@ app.post('/api/save-data', async (req, res) => {
     }
 
     const query = `
-      INSERT INTO business_cards (event_name, scan_by, name, designation, company, phone, email, website, address, remarks, file_path)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO business_cards (event_name, scan_by, name, designation, company, phone, email, website, address, city, state, rank, remarks, file_path)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING id
     `;
 
-    const result = await pool.query(query, [event_name, scan_by, name, designation, company, phone, email, website, address, remarks, file_path]);
+    const result = await pool.query(query, [event_name, scan_by, name, designation, company, phone, email, website, address, city, state, rank, remarks, file_path]);
 
     res.json({
       success: true,
@@ -359,7 +365,10 @@ app.get('/api/export-data', async (req, res) => {
       return text;
     };
 
-    const headers = ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
+    const isPoliceExpo = eventName && eventName.toLowerCase() === normalizeEventName('Police Expo').toLowerCase();
+    const headers = isPoliceExpo
+      ? ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'city', 'state', 'rank', 'remarks', 'created_at']
+      : ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
     const csvRows = [headers.join(',')];
 
     rows.forEach(row => {
