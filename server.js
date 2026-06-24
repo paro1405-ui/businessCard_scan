@@ -84,6 +84,8 @@ const initDb = async () => {
 
     // Ensure newer columns exist for backwards compatibility
     await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS scan_by TEXT`);
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS website TEXT`);
+    await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS address TEXT`);
     await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS city TEXT`);
     await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS state TEXT`);
     await pool.query(`ALTER TABLE business_cards ADD COLUMN IF NOT EXISTS rank TEXT`);
@@ -365,8 +367,15 @@ app.get('/api/export-data', async (req, res) => {
       return text;
     };
 
-    const isPoliceExpo = eventName && eventName.toLowerCase() === normalizeEventName('Police Expo').toLowerCase();
-    const headers = isPoliceExpo
+    const specialManualEvent = (name) => {
+      if (!name || typeof name !== 'string') {
+        return false;
+      }
+      const normalized = name.trim().toLowerCase().replace(/\s+/g, '');
+      return normalized === 'policeexpo' || normalized === 'iws';
+    };
+    const isSpecialEvent = specialManualEvent(eventName);
+    const headers = isSpecialEvent
       ? ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'city', 'state', 'rank', 'remarks', 'created_at']
       : ['id', 'event_name', 'scan_by', 'name', 'designation', 'company', 'phone', 'email', 'website', 'address', 'remarks', 'created_at'];
     const csvRows = [headers.join(',')];
