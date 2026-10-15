@@ -74,7 +74,7 @@ const initDb = async () => {
     `);
 
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS event_list (
+      CREATE TABLE IF NOT EXISTS eventlist (
         id SERIAL PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
         is_active BOOLEAN NOT NULL DEFAULT true,
@@ -124,18 +124,40 @@ app.get('/', (req, res) => {
 app.get('/api/events', async (req, res) => {
   try {
     const activeOnly = req.query.active === 'true';
-    let query = 'SELECT id, event_name, isactive FROM eventlist';
+    let query = 'SELECT id, name AS event_name, is_active AS isactive FROM eventlist';
     const params = [];
     if (activeOnly) {
-      query += ' WHERE isactive = true';
+      query += ' WHERE is_active = true';
     }
-    query += ' ORDER BY event_name ASC';
+    query += ' ORDER BY name ASC';
 
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
     console.error('Error fetching event list:', error);
     res.status(500).json({ error: 'Failed to fetch event list', details: error.message });
+  }
+});
+
+app.post('/api/events', async (req, res) => {
+  try {
+    const eventName = typeof req.body.event_name === 'string' ? req.body.event_name.trim() : '';
+    if (!eventName) {
+      return res.status(400).json({ error: 'Event name is required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO eventlist (name)
+       VALUES ($1)
+       ON CONFLICT (name) DO UPDATE SET is_active = true
+       RETURNING id, name AS event_name, is_active AS isactive`,
+      [eventName]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error saving event:', error);
+    res.status(500).json({ error: 'Failed to save event', details: error.message });
   }
 });
 
